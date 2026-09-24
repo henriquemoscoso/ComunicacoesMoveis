@@ -5,6 +5,8 @@ from IPython.display import display
 # %%
 # Frequência central da simulação (em GHz)
 FREQUENCIA_CENTRAL = 3
+# Velocidade da luz: constante global
+C = 3e8
 # %%
 # Classe para criar o espaço 3D
 class Espaco3D:
@@ -154,6 +156,56 @@ class CenarioSimulacao:
         "UMi":    {"mu": 9, "sigma": 5},
         "UMa":    {"mu": 9, "sigma": 3.5},
         "indoor": {"mu": 7, "sigma": 4},
+    }
+
+    # Parâmetros de espalhamento angular AoD (Azimutal de saída)
+    PARAMETROS_AOD_AZI = {
+        ("UMi", True):     {"mu": lambda fc: -0.05*np.log10(1+fc)+1.21, "sigma": 0.41},
+        ("UMi", False):    {"mu": lambda fc: -0.23*np.log10(1+fc)+1.53, "sigma": lambda fc: 0.11*np.log10(1+fc)+0.33},
+        ("UMa", True):     {"mu": lambda fc: 1.06+0.1114*np.log10(fc),  "sigma": 0.28},
+        ("UMa", False):    {"mu": lambda fc: 1.5-0.1144*np.log10(fc),   "sigma": 0.28},
+        ("indoor", True):  {"mu": 1.60, "sigma": 0.18},
+        ("indoor", False): {"mu": 1.62, "sigma": 0.25},
+    }
+
+    # Parâmetros de espalhamento angular AoA (Azimutal de chegada)
+    PARAMETROS_AOA_AZI = {
+        ("UMi", True):     {"mu": lambda fc: -0.08*np.log10(1+fc)+1.73, "sigma": lambda fc: 0.014*np.log10(1+fc)+0.28},
+        ("UMi", False):    {"mu": lambda fc: -0.08*np.log10(1+fc)+1.81, "sigma": lambda fc: 0.05*np.log10(1+fc)+0.3},
+        ("UMa", True):     {"mu": 1.81, "sigma": 0.20},
+        ("UMa", False):    {"mu": lambda fc: 2.08-0.27*np.log10(fc),    "sigma": 0.11},
+        ("indoor", True):  {"mu": lambda fc: -0.19*np.log10(1+fc)+1.781, "sigma": lambda fc: 0.12*np.log10(1+fc)+0.119},
+        ("indoor", False): {"mu": lambda fc: -0.11*np.log10(1+fc)+1.863, "sigma": lambda fc: 0.12*np.log10(1+fc)+0.059},
+    }
+
+    # Parâmetros de espalhamento angular AoA (elevacional de chegada)
+    PARAMETROS_AOA_ELE = {
+        ("UMi", True):     {"mu": lambda fc: -0.1*np.log10(1+fc)+0.73,  "sigma": lambda fc: -0.04*np.log10(1+fc)+0.34},
+        ("UMi", False):    {"mu": lambda fc: -0.04*np.log10(1+fc)+0.92, "sigma": lambda fc: -0.07*np.log10(1+fc)+0.41},
+        ("UMa", True):     {"mu": 0.95, "sigma": 0.16},
+        ("UMa", False):    {"mu": lambda fc: -0.3236*np.log10(fc)+1.512, "sigma": 0.16},
+        ("indoor", True):  {"mu": lambda fc: -0.26*np.log10(1+fc)+1.44, "sigma": lambda fc: -0.04*np.log10(1+fc)+0.264},
+        ("indoor", False): {"mu": lambda fc: -0.15*np.log10(1+fc)+1.387, "sigma": lambda fc: -0.09*np.log10(1+fc)+0.746},
+    }
+
+    # Parâmetro do fator de proporcionalidade
+    PARAMETRO_R_TAU = {
+        ("UMi", True):     3.0,
+        ("UMi", False):    2.1,
+        ("UMa", True):     2.5,
+        ("UMa", False):    2.3,
+        ("indoor", True):  3.6,
+        ("indoor", False): 3.0,         
+    }
+
+    # Parâmetros para sombra
+    PARAMETROS_SOMBREAMENTO = {
+        ("UMi", True):     3,
+        ("UMi", False):    3,
+        ("UMa", True):     3,
+        ("UMa", False):    3,
+        ("indoor", True):  6,
+        ("indoor", False): 3,
     }
 
     def __init__(self,tipo_do_ambiente, phi0_graus, limite_espaco):
@@ -318,9 +370,10 @@ class CenarioSimulacao:
             else:
                 return np.exp(-(d_2D - 6.5) / 32.6) * 0.32
 
-    # Cospe a variável aleatória (com distribuição uniforme para definir se é LoS (1) ou NLoS (0))
     def variavel_aleatoria_LoS(self):
-
+        """
+        Cospe a variável aleatória (com distribuição uniforme para definir se é LoS (1) ou NLoS (0))
+        """
         p_los = self.probabilidade_LoS()
         x = np.random.uniform(0,1)
 
@@ -370,8 +423,262 @@ class CenarioSimulacao:
 
         self.K_R = 10**(K_dB/10)
         return self.K_R
-    
+
+    def _avaliar(self,parametro, fc): 
+        '''
+        Função auxiliar: resolve um parâmetro que pode ser fixo ou em função de fc
+        '''
+        if callable(parametro): 
+            return parametro(fc)
+        else: 
+            return parametro
+
+    def _media_std_AoD_saida(self):
+        '''
+        Calcula a média (mu) e o desvio-padrão (std ou sigma) para o ângulo de saída 
+        elevacional 
+        '''
+
+        fc = FREQUENCIA_CENTRAL
+
+        # Posições da UT 
+        x_ut, y_ut, h_ut = self.posicao_ut
+        # Posição da BS
+        _,_,h_bs = self.posicao_BS
+
+        # Calcula a distância no plano xy em km
+        d_2D_km = np.sqrt(x_ut**2 + y_ut**2) / 1000
+
+        amb, LoS = self.tipo_do_ambiente , self.estado_LoS
+
+        if amb == "UMa":
+            if LoS:
+                media = max(-0.5, -2.1*d_2D_km - 0.01*(h_ut-1.5) + 0.75)
+                std = 0.40
+            else:
+                media = max(-0.5, -2.1*d_2D_km - 0.01*(h_ut-1.5) + 0.9)
+                std = 0.49
+
+        elif amb == "UMi":
+            if LoS:
+                media = max(-0.21, -14.8*d_2D_km + 0.01*abs(h_ut - h_bs) + 0.83)
+                std = 0.35
+            else:
+                media = max(-0.5, -3.1*d_2D_km + 0.01*max(h_ut - h_bs, 0) + 0.2)
+                std = 0.35
+
+        elif amb == "indoor":
+            if LoS:
+                media = -1.43*np.log10(1+fc) + 2.228
+                std = 0.13*np.log10(1+fc) + 0.30
+            else:
+                media = 1.08
+                std = 0.36
         
+        return media, std   
+
+    def gerar_espalhamento_angular(self): 
+        '''
+        Gera o espalhamento angular para os quatro casos (AoA e AoD elevacional 
+        e azimutal)
+        ''' 
+
+        # Depende da geração do estado LoS
+        if not hasattr(self, "estado_LoS"): 
+            raise RuntimeError("Estado LoS não gerado")
+
+        fc = FREQUENCIA_CENTRAL
+        # Identificando o problema com tipo do ambiente e o estaod LoS
+        chave = (self.tipo_do_ambiente, self.estado_LoS)
+
+        # Pegando o espalhamento azimutal de chegada
+        p_aoa_azi = self.PARAMETROS_AOA_AZI[chave]
+        # Pegando o espalhamento azimutal de saída
+        p_aod_azi = self.PARAMETROS_AOD_AZI[chave]
+        # Pegando o espalhamento elevacional de chegada
+        p_aoa_ele = self.PARAMETROS_AOA_ELE[chave]
+
+        # A partir dos parâmetros, retiramos as médias e desvios padrão
+        media_aoa_azi , std_aoa_azi = self._avaliar(p_aoa_azi["mu"], fc), self._avaliar(p_aoa_azi["sigma"], fc)
+        media_aod_azi , std_aod_azi = self._avaliar(p_aod_azi["mu"], fc), self._avaliar(p_aod_azi["sigma"], fc)
+        media_aoa_ele , std_aoa_ele = self._avaliar(p_aoa_ele["mu"], fc), self._avaliar(p_aoa_ele["sigma"], fc)
+
+        media_aod_ele, std_aod_ele = self._media_std_AoD_saida()
+
+        # Distribuições normais dos ângulos de chegada e saída 
+        sigma_phi_AoD   = 10 ** np.random.normal(media_aod_azi, std_aod_azi)
+        sigma_phi_AoA   = 10 ** np.random.normal(media_aoa_azi, std_aoa_azi)
+        sigma_theta_AoD = 10 ** np.random.normal(media_aod_ele, std_aod_ele)
+        sigma_theta_AoA = 10 ** np.random.normal(media_aoa_ele, std_aoa_ele)
+
+        # Implementando os limites de 104 graus para azimute e 52 graus para elevação
+        self.sigma_phi_AoD   = min(sigma_phi_AoD, 104)
+        self.sigma_phi_AoA   = min(sigma_phi_AoA, 104)
+        self.sigma_theta_AoD = min(sigma_theta_AoD, 52)
+        self.sigma_theta_AoA = min(sigma_theta_AoA, 52)
+
+        return {
+            "sigma_phi_AoD": self.sigma_phi_AoD,
+            "sigma_phi_AoA": self.sigma_phi_AoA,
+            "sigma_theta_AoD": self.sigma_theta_AoD,
+            "sigma_theta_AoA": self.sigma_theta_AoA,
+        }
+
+    
+    def gerar_atrasos_multipercursos(self, N=100):
+        '''
+        Gera as N componentes de atrasos multipercursos. Requer que o espalhamento de atraso já tenha sido 
+        calculado. Retorna os atrasados ordenados. 
+        '''
+
+        if not hasattr(self, 'std_espalhamento'): 
+            raise RuntimeError('Espalhamento de atraso ainda não gerado.')
+
+        chave = (self.tipo_do_ambiente, self.estado_LoS)
+        r_tau = self.PARAMETRO_R_TAU[chave]
+
+        # A média é o produto do fator de proporcionalidade pelo sigma_tau (desvio-padrão do espalhamento de atraso)
+        # Essa é a média da distribuição exponencial dos atrasos
+        media_tau = r_tau * self.std_espalhamento
+
+        # PDF dos atrasos
+        f_tau = np.random.exponential(scale=media_tau, size=N)
+
+        tau_p = f_tau - np.min(f_tau)
+        tau_n = np.sort(tau_p)
+
+        self.N = N 
+        self.r_tau = r_tau
+        self.atrasos = tau_n
+
+        return tau_n
+
+    def gerar_potencia_multipercurso(self): 
+        """
+        Gera a potência de cada componente multipercurso, dependendo do caso de LoS ou NLoS.
+        """
+
+        # Precisa gerar o atraso multipercurso 
+        if not hasattr(self,'atrasos'): 
+            raise RuntimeError("Atrasos ainda não foram gerados.")
+
+        # Sombreamento 
+        std_sombreamento = self.PARAMETROS_SOMBREAMENTO[(self.tipo_do_ambiente, self.estado_LoS)]
+
+        # Gerando os termos de sombreamento (variável aleatória com desvio-padrão de std_sombreamento)
+        n_somb = np.random.normal(0,std_sombreamento,self.N)
+
+        # Potência preliminar 
+        alpha_2 = np.exp(-self.atrasos * (self.r_tau - 1)/(self.r_tau * self.std_espalhamento)) * 10**(-n_somb/10)
+
+        # Normalizar a potência dependendo do estado de visada direta 
+        # Se tiver visada direta
+        if self.estado_LoS: 
+            omega_c = np.sum(alpha_2[1:])
+
+            alpha_2_norm = np.zeros(self.N)
+            alpha_2_norm[1:] = (1 / (self.K_R + 1)) * alpha_2[1:] / omega_c
+            alpha_2_norm[0] = self.K_R / (self.K_R + 1)
+        else: 
+            omega_c = np.sum(alpha_2[1:])
+            alpha_2_norm = alpha_2/omega_c
+
+        self.potencias = alpha_2_norm
+
+        return alpha_2_norm
+
+    def gerar_angulos_chegada(self): 
+        """
+        Gera o ângulo de chegada azimutal e elevacional (phi e theta), precisando dos valores das potências 
+        e dos desvios-padrão dos ângulos de chegadas azimutais.
+        """
+
+        # Verificando se as potências e o desvio-padrão do ângulo azimutal de 
+        # chegada já foram gerados 
+        if not hasattr(self,"sigma_theta_AoA"):
+            raise RuntimeError("Gere antes o desvio-padrão dos ângulos elevacionais de chegada")
+        if not hasattr(self,'potencias'): 
+            raise RuntimeError("Gere primeiramente as potências.")
+        if not hasattr(self,"sigma_phi_AoA"): 
+            raise RuntimeError("Gere o desvio-padrão do ângulo de chegada primeiramente.")
+
+        # Valor máximo da potência 
+        max_alpha_2 = max(self.potencias)
+
+        # Valores dos ângulos iniciais 
+        phi_inicial_n = 1.42*self.sigma_phi_AoA*np.sqrt(-np.log(self.potencias/max_alpha_2))
+        theta_inicial_n = -self.sigma_theta_AoA*np.log(self.potencias/max_alpha_2)
+
+        # Gerando sinais aleatórios
+        U_n = np.random.choice([-1, 1], size=self.N)
+        # Flutuações aleatórias 
+        Y_n_phi = np.random.normal(0, self.sigma_phi_AoA/7, self.N)
+        Y_n_theta = np.random.normal(0, self.sigma_theta_AoA/7, self.N)
+
+        phi_LoS = self.angulos_LoS()["phi_aoa"]
+        theta_LoS = self.angulos_LoS()["theta_eoa"]
+
+        phi_n = U_n*phi_inicial_n + Y_n_phi + phi_LoS
+        theta_n = U_n*theta_inicial_n + Y_n_theta + theta_LoS
+
+        if self.estado_LoS:
+            phi_n[0] = phi_LoS 
+            theta_n[0] = theta_LoS
+
+        self.angulo_azimutal_chegada = phi_n
+        self.angulo_elevacional_chegada = theta_n
+
+        return phi_n, theta_n
+
+    def gerar_vetor_chegada(self): 
+        """
+        Gera o vetor de chegada com base nos ângulos elevacionais e azimutais 
+        de chegada.
+        """
+
+        # Precisa dos theta e phi 
+        if not hasattr(self,'angulo_azimutal_chegada'): 
+            raise RuntimeError("Precisa gerar ângulo azimutal de chegada")
+        if not hasattr(self,"angulo_elevacional_chegada"): 
+            raise RuntimeError("Precisa gerar ângulo elevacional de chegada")
+
+        # ângulo azimutal em radiano 
+        phi_rad = np.radians(self.angulo_azimutal_chegada)
+        # ângulo elevacional está representado por enquanto na horizontal, quando precisaria estar na vertical
+        # solução é atrasar 90 graus antes de passar para radiano 
+        theta_rad = np.radians(90-self.angulo_elevacional_chegada)
+
+        x = np.cos(phi_rad)*np.sin(theta_rad)
+        y = np.sin(phi_rad)*np.sin(theta_rad)
+        z = np.cos(theta_rad)
+
+        r_n = np.column_stack((x,y,z))
+
+        self.vetores_direcao_chegada = r_n
+
+        return r_n
+
+    def gerar_desvio_doppler(self): 
+        """
+        Gera o desvio doppler f_n, com velocidade v_rx do receptor. 
+        """
+        if not hasattr(self,"vetores_direcao_chegada"): 
+            raise RuntimeError("Precisa gerar o vetor de direção de chegada")
+        if not hasattr(self,"v_hat"): 
+            raise RuntimeError("Precisa gerar a mobilidade (vetor velocidade)")
+
+        comp_de_onda = C/(FREQUENCIA_CENTRAL*1e9)
+
+        # velocidade em m/s
+        v = self.velocidade/3.6
+        v_vetor = v*self.v_hat
+
+        # Produto escalar
+        f_n = (1/comp_de_onda)*np.sum(self.vetores_direcao_chegada*v_vetor, axis=1)
+
+        self.desvio_doppler = f_n
+        return f_n
+
     def mostrar(self):
         self.espaco.mostrar()
 
@@ -447,4 +754,81 @@ for i in range(1,4):
     cenario.variavel_aleatoria_LoS()
     lista_teste.append(cenario.gerar_fator_rice())
 lista_teste
+# %%
+# Testando média e std para AoD elevacional 
+cenario = CenarioSimulacao("indoor", 30, 35)
+cenario._media_std_AoD_saida()
+# %%
+# Testando potência multipercurso 
+
+cenario.variavel_aleatoria_LoS()
+cenario.gerar_espalhamento_de_atraso()
+cenario.gerar_fator_rice()
+cenario.gerar_atrasos_multipercursos(N=100)
+
+potencias = cenario.gerar_potencia_multipercurso()
+
+plt.figure(figsize=(8, 4))
+plt.stem(cenario.atrasos * 1e6, potencias, basefmt=" ") 
+plt.yscale('log')
+plt.xlabel("Domínio de Atraso - τ (μs)")
+plt.ylabel("PDP")
+plt.title(f"σ_τ = {cenario.std_espalhamento*1e9:.2f} ns")
+plt.grid(alpha=0.3, which='both')
+plt.tight_layout()
+plt.show()
+
+# %%
+# Testando ângulo azimutal e elevacional de chegada 
+cenario.gerar_espalhamento_angular()
+phi, theta = cenario.gerar_angulos_chegada()
+
+plt.figure(figsize=(6,6))
+ax = plt.subplot(111, projection='polar')
+ax.stem(np.radians(cenario.angulo_azimutal_chegada), cenario.potencias, bottom=1e-8)  # <- bottom aqui
+ax.set_rscale('log')
+ax.set_rlim(bottom=1e-8, top=1.5)
+ax.set_title(f"Espectro Angular de Potência (Azimute) - σ_phi,AoA={cenario.sigma_phi_AoA:.2f}°")
+plt.show()
+
+plt.figure(figsize=(6,6))
+ax = plt.subplot(111, projection='polar')
+ax.stem(np.radians(cenario.angulo_elevacional_chegada), cenario.potencias, bottom=1e-8)  # <- bottom aqui
+ax.set_rscale('log')
+ax.set_rlim(bottom=1e-8, top=1.5)
+ax.set_title(f"Espectro Angular de Potência (Elevação) - σ_theta,AoA={cenario.sigma_theta_AoA:.2f}°")
+plt.show()
+
+# %%
+r_n = cenario.gerar_vetor_chegada()
+fig = plt.figure(figsize=(7, 7))
+ax = fig.add_subplot(111, projection='3d')
+
+for i in range(cenario.N):
+    cor = 'blue' if (i == 0 and cenario.estado_LoS) else 'red'
+    ax.quiver(0, 0, 0, r_n[i, 0], r_n[i, 1], r_n[i, 2],
+              color=cor, arrow_length_ratio=0.15, linewidth=1)
+
+ax.set_xlim([-1, 1])
+ax.set_ylim([-1, 1])
+ax.set_zlim([-1, 1])
+ax.set_xlabel("Eixo X")
+ax.set_ylabel("Eixo Y")
+ax.set_zlabel("Eixo Z")
+ax.set_title(f"Vetores Direção de Chegada (N={cenario.N}, {'LOS' if cenario.estado_LoS else 'NLOS'})")
+ax.set_box_aspect([1, 1, 1])
+
+plt.show()
+# %%
+
+cenario.mobilibdade(v_kmh=3, phi0v_graus=200, theta0v_graus=0)
+nu_n = cenario.gerar_desvio_doppler()
+plt.figure(figsize=(8,4))
+plt.stem(nu_n, cenario.potencias, basefmt=" ")
+plt.yscale('log')
+plt.xlabel("Domínio de Desvio Doppler - ν (Hz)")
+plt.ylabel("Espectro Doppler")
+plt.title(f"Espectro Doppler (v={cenario.velocidade} km/h)")
+plt.grid(alpha=0.3, which='both')
+plt.show()
 # %%
