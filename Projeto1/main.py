@@ -679,6 +679,120 @@ class CenarioSimulacao:
         self.desvio_doppler = f_n
         return f_n
 
+    def gerar_sinal_recebido(self, delta_t, N_t = 1e5, t_max_factor = 5): 
+        """"
+        Gera o sinal recebido, combinando todos os parâmetros calculados anteriormente.
+        O pulso gerado (com largura delta_t) e transmitido é s(t) e o recebido é r(t), considerando as componentes 
+        multipercurso.
+
+
+        """
+
+        # Precisamos gerar o desvio doppler 
+        if not hasattr(self, "desvio_doppler"): 
+            raise RuntimeError("Precisa gerar o desvio doppler")
+
+        # Precisamos gerar os atrasos 
+        if not hasattr(self, "atrasos"): 
+            raise RuntimeError("Precisa gerar os atrasos")
+        # Precisamos gerar as potências 
+        if not hasattr(self, "potencias"): 
+            raise RuntimeError("Precisa gerar as potências")
+        fc_hz = FREQUENCIA_CENTRAL * 1e9   # GHz -> Hz, essencial aqui!
+
+        fases_estaticas = 2 * np.pi * (fc_hz + self.desvio_doppler) * self.atrasos
+        # Vetor temporal 
+        t = np.linspace(0,t_max_factor*delta_t, N_t)
+
+        # Sinal transmitido. Gera o pulso de amplitude 1 se t está entre 0 e delta_t
+        s_t = ((t >= 0) & (t < delta_t)).astype(float)
+
+        # Amplitudes: raiz quadrada da potência
+        alpha_n = np.sqrt(self.potencias)
+
+        # Sinal recebido
+        r_t = np.zeros(N_t, dtype=complex)
+
+        for n in range(self.N): 
+            # Deslocando o pulso no tempo, devido aos atrasos
+            s_deslocado = ((t - self.atrasos[n] >= 0) & (t - self.atrasos[n] < delta_t)).astype(float)
+
+            # A fase completa 
+            fase_n_t = fases_estaticas[n] - 2 * np.pi * self.desvio_doppler[n] * t
+
+            # Agora, o sinal recebido completo
+            r_t += alpha_n[n] * np.exp(-1j * fase_n_t) * s_deslocado
+
+        self.tempo = t
+        self.sinal_transmitido = s_t
+        self.sinal_recebido = r_t
+        return t, s_t, r_t
+
+    def gerar_autocorrelacao(self, kappa = 0, sigma = 0):
+        """
+        Calcula a função de autocorrelação normalizada do canal.
+        """ 
+
+        if not hasattr(self, 'potencias') or not hasattr(self, 'atrasos') or not hasattr(self, 'desvio_doppler'):
+            raise RuntimeError("Gere potências, atrasos e desvios Doppler antes.")
+
+        Omega_c = np.sum(self.potencias)
+        kappa = np.atleast_1d(kappa)
+        sigma = np.atleast_1d(sigma)
+
+
+        fase_atraso = np.exp(-1j * 2*np.pi * np.outer(kappa, self.atrasos))   
+        fase_doppler = np.exp(1j * 2*np.pi * np.outer(sigma, self.desvio_doppler))  
+
+        if len(kappa) >= len(sigma):
+            # Produto matricial, por isso o @
+            rho = (fase_atraso @ (self.potencias * fase_doppler[0])) / Omega_c
+        else:
+            rho = (fase_doppler @ (self.potencias * fase_atraso[0])) / Omega_c
+
+        return rho if rho.size > 1 else rho[0]
+
+    def calcular_banda_coerencia(self, limiares=(0.95, 0.8), kappa_max=1e10, n_pontos=3000):
+        """
+        Calcula a banda de coerência.
+        """
+        Omega_c = np.sum(self.potencias)
+        kappas = np.logspace(0, np.log10(kappa_max), n_pontos)  
+
+        fase = np.exp(-1j * 2*np.pi * np.outer(kappas, self.atrasos))  
+        rho = np.abs(fase @ self.potencias) / Omega_c
+
+        resultado = {}
+        for rho_B in limiares:
+            abaixo = np.where(rho < rho_B)[0]
+            resultado[rho_B] = kappas[abaixo[0]] if len(abaixo) > 0 else kappa_max
+
+        self.banda_coerencia = resultado
+        self._kappas_teste, self._rho_kappa = kappas, rho  
+        return resultado
+
+    def calcular_tempo_coerencia(self, limiares=(0.95, 0.8), sigma_max=1.0, n_pontos=3000):
+        """
+        Calcula o tempo de coerência.
+        """
+        Omega_c = np.sum(self.potencias)
+        sigmas = np.logspace(-6, np.log10(sigma_max), n_pontos)
+
+        fase = np.exp(1j * 2*np.pi * np.outer(sigmas, self.desvio_doppler))  
+        rho = np.abs(fase @ self.potencias) / Omega_c
+
+        resultado = {}
+        for rho_T in limiares:
+            abaixo = np.where(rho < rho_T)[0]
+            resultado[rho_T] = sigmas[abaixo[0]] if len(abaixo) > 0 else sigma_max
+
+        self.tempo_coerencia = resultado
+        self._sigmas_teste, self._rho_sigma = sigmas, rho
+        return resultado
+
+
+
+
     def mostrar(self):
         self.espaco.mostrar()
 
@@ -830,5 +944,43 @@ plt.xlabel("Domínio de Desvio Doppler - ν (Hz)")
 plt.ylabel("Espectro Doppler")
 plt.title(f"Espectro Doppler (v={cenario.velocidade} km/h)")
 plt.grid(alpha=0.3, which='both')
+plt.show()
+# %%
+t, s_tx, r_t = cenario.gerar_sinal_recebido(delta_t=1e-7, N_t=100000)
+plt.figure(figsize=(9, 5))
+plt.plot(t, s_tx, color='blue', label='Sinal Transmitido')
+plt.plot(t, np.abs(r_t), color='red', label='Sinal Recebido')
+plt.xlabel("Tempo absoluto - t (s)")
+plt.ylabel("|r̃(t)|")
+plt.title(f"δt = 1e-07 s, σ_τ = {cenario.std_espalhamento*1e9:.2f} ns")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
+# %%
+banda = cenario.calcular_banda_coerencia(limiares=(0.95, 0.8))
+tempo = cenario.calcular_tempo_coerencia(limiares=(0.95, 0.8))
+
+plt.figure(figsize=(8,4))
+plt.semilogx(cenario._kappas_teste, cenario._rho_kappa)
+for lim, k in cenario.banda_coerencia.items():
+    plt.axvline(k, color='gray', linestyle='--')
+plt.axhline(0.95, color='gray', linestyle='-.', linewidth=0.8)
+plt.axhline(0.8, color='gray', linestyle='-.', linewidth=0.8)
+plt.xlabel("Desvio de Frequência - κ (Hz)")
+plt.ylabel("|ρ_TT(κ,0)|")
+plt.title(f"B_C(0.95)={banda[0.95]/1e6:.2f} MHz, B_C(0.8)={banda[0.8]/1e6:.2f} MHz")
+plt.grid(alpha=0.3)
+plt.show()
+# %%
+plt.figure(figsize=(8,4))
+plt.semilogx(cenario._sigmas_teste, cenario._rho_sigma)
+for lim, s in cenario.tempo_coerencia.items():
+    plt.axvline(s, color='gray', linestyle='--')
+plt.axhline(0.95, color='gray', linestyle='-.', linewidth=0.8)
+plt.axhline(0.8, color='gray', linestyle='-.', linewidth=0.8)
+plt.xlabel("Desvio de Tempo - σ (s)")
+plt.ylabel("|ρ_TT(0,σ)|")
+plt.title(f"T_C(0.95)={tempo[0.95]*1e3:.2f} ms, T_C(0.8)={tempo[0.8]*1e3:.2f} ms")
+plt.grid(alpha=0.3)
 plt.show()
 # %%
