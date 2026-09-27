@@ -13,7 +13,7 @@ from main import CenarioSimulacao
 
 AMBIENTE = "indoor"
 PHI0_GRAUS = 30
-LIMITE_ESPACO = 60
+MARGEM_ESPACO = 1.3
 N_COMPONENTES = 100
 
 VELOCIDADE_KMH = 30
@@ -200,7 +200,10 @@ def figura_tempo_coerencia(cenario_base):
 
 
 
-cenario = CenarioSimulacao(AMBIENTE, phi0_graus=PHI0_GRAUS, limite_espaco=LIMITE_ESPACO)
+parametros_ambiente = CenarioSimulacao.PARAMETROS_DO_AMBIENTE[AMBIENTE]
+limite_espaco = max(parametros_ambiente["h_bs"], parametros_ambiente["d_2D"]) * MARGEM_ESPACO
+
+cenario = CenarioSimulacao(AMBIENTE, phi0_graus=PHI0_GRAUS, limite_espaco=limite_espaco)
 rodar_pipeline(cenario)
 
 
